@@ -173,6 +173,15 @@ elif init_from == 'resume':
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
+elif init_from.starts_with('adapter'):
+    print(f"Initializing from OpenAI GPT-2 weights and injecting adapter: {init_from}")
+    # initialize from OpenAI GPT-2 weights
+    override_args = dict(dropout=dropout)
+    # Todo: take gpt2 model as second word in init_from
+    model = ModifiedGPT2.from_pretrained('gpt2', override_args)
+    # read off the created config params, so we can store them into checkpoint correctly
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+        model_args[k] = getattr(model.config, k)
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
