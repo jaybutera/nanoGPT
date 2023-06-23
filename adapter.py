@@ -68,6 +68,7 @@ max_iters = 100
 eval_iters = 20
 iter_num = 0
 best_val_loss = 1e9
+out_dir = '.'
 
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
@@ -142,15 +143,16 @@ for iter_num in range(max_iters):
     # Evaluate loss every once in a while
     if iter_num % eval_interval == 0:
         checkpoint = {
-            'model': raw_model.state_dict(),
+            'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             #'model_args': model_args,
             'iter_num': iter_num,
             'best_val_loss': best_val_loss,
-            'config': config,
+            #'config': config,
         }
         losses = estimate_loss(model)
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        best_val_loss = losses['val'] if losses['val'] < best_val_loss else best_val_loss
         torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
 
     # Sample a batch of data
