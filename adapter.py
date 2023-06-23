@@ -2,8 +2,12 @@ from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 from transformers import GPT2LMHeadModel , GPT2Tokenizer
 from transformers import GPT2Model, GPT2Config
 from transformers import GPT2Tokenizer
+from contextlib import nullcontext
 import torch.nn.init as init
 import torch.nn as nn
+import torch
+import os
+import numpy as np
 
 class ModifiedGPT2Block(GPT2Block):
     def __init__(self, config):
@@ -55,15 +59,96 @@ class ModifiedGPT2(GPT2LMHeadModel):
         self.h = nn.ModuleList([ModifiedGPT2Block(config) for _ in range(config.n_layer)])
 
 #if __name__ == '__main__':
-# Usage
+## Load Data
+block_size = 128
+batch_size = 32
+learning_rate = 1e-3
+eval_interval = 10
+max_iters = 100
+eval_iters = 20
+iter_num = 0
+best_val_loss = 1e9
+
+device = 'cpu'
+device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+dataset = 'shakespeare'
+data_dir = os.path.join('data', dataset)
+train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+print('Loaded dataset...')
+
+def get_batch(split):
+    data = train_data if split == 'train' else val_data
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
+
+# attempt to derive vocab_size from the dataset
+meta_path = os.path.join(data_dir, 'meta.pkl')
+meta_vocab_size = None
+if os.path.exists(meta_path):
+    with open(meta_path, 'rb') as f:
+        meta = pickle.load(f)
+    meta_vocab_size = meta['vocab_size']
+    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+
+# helps estimate an arbitrarily accurate loss over either split using many batches
+@torch.no_grad()
+def estimate_loss(model):
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            with ctx:
+                outs = model(input_ids=X, labels=Y)
+                loss = outs.loss
+                logits = outs.logits
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+## Load Model
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2') 
-#config = GPT2Config.from_pretrained('gpt2', pad_token_id=tokenizer.eos_token_id)
-#model = GPT2LMHeadModel.from_pretrained('gpt2', pad_token_id=tokenizer.eos_token_id)
-#model = ModifiedGPT2(config)
 model = ModifiedGPT2.from_pretrained('gpt2', pad_token_id=tokenizer.eos_token_id)
+model.to(device)
+print('loaded ModifiedGPT2 to device...')
 
 ## Finetune Training
-#optim = torch.optim.Adam
+# Pytorch optimizer
+params = []
+for name,param in model.named_parameters():
+    if 'adapter' in name:
+        params.append(param)
+optimizer = torch.optim.AdamW(params, lr=learning_rate)
+
+for iter in range(max_iters):
+    # Evaluate loss every once in a while
+    if iter % eval_interval == 0:
+        losses = estimate_loss(model)
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+    # Sample a batch of data
+    xb, yb = get_batch('train')
+    # Forward
+    outs = model(xb, labels=yb)
+    loss = outs.loss
+    logits = outs.logits
+    # Backward
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    # Update
+    optimizer.step()
 
 ## Inference
 #tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
