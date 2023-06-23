@@ -69,9 +69,15 @@ eval_iters = 20
 iter_num = 0
 best_val_loss = 1e9
 
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+compile = True # use PyTorch 2.0 to compile the model to be faster
 device = 'cpu'
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+#--------------------------------------
 
 dataset = 'shakespeare'
 data_dir = os.path.join('data', dataset)
@@ -132,11 +138,20 @@ for name,param in model.named_parameters():
         params.append(param)
 optimizer = torch.optim.AdamW(params, lr=learning_rate)
 
-for iter in range(max_iters):
+for iter_num in range(max_iters):
     # Evaluate loss every once in a while
-    if iter % eval_interval == 0:
+    if iter_num % eval_interval == 0:
+        checkpoint = {
+            'model': raw_model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            #'model_args': model_args,
+            'iter_num': iter_num,
+            'best_val_loss': best_val_loss,
+            'config': config,
+        }
         losses = estimate_loss(model)
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
 
     # Sample a batch of data
     xb, yb = get_batch('train')
